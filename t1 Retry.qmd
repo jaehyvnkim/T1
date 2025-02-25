@@ -1,0 +1,144 @@
+---
+title: "T1 Retry"
+format: html
+editor: visual
+---
+
+You can add options to executable code like this
+
+```{r}
+library(tidyverse)
+library(sf)
+library(DBI)
+library(here)
+library(leaflet)
+library(maptiles)
+library(tidyterra)
+library(knitr)
+library(tigris)
+library (RSQLite)
+
+sf::sf_use_s2(FALSE)
+```
+
+```{r}
+TAZs <- here("inputs",
+             "zonal",
+             "shp",
+             "CTPS_TDM23_TAZ_2017g_v202303.shp") |>
+  st_read(quiet = TRUE) |>
+  st_transform("WGS84")
+
+base_map <- get_tiles(TAZs,
+                      provider = "CartoDB.Positron",
+                      zoom = 8,
+                      crop = TRUE)
+
+ggplot(TAZs) +
+  geom_spatraster_rgb(data = base_map) +
+  geom_sf(fill = NA,
+          color = "orange") +
+  theme_void()
+```
+
+```{r}
+somermed_TAZs <- TAZs |>
+  filter(town %in% c("SOMERVILLE", "MEDFORD"))
+
+
+leaflet(somermed_TAZs) |>
+  addProviderTiles(provider = "CartoDB.Positron") |>
+  addPolygons(weight = 2,
+              color = "orange",
+              fillColor = "orange",
+              fillOpacity = 0.1,
+              highlightOptions = highlightOptions(weight = 3,
+                                                  fillOpacity = 0.5),
+              label = somermed_TAZs$taz_id)
+```
+
+```{r}
+somermed_blocks <- blocks(state = "MA", 
+                          county = "Middlesex", 
+                          year = 2010,
+                          progress_bar = FALSE) |>
+  st_transform("WGS84") |>
+  st_filter(somermed_TAZs)
+
+leaflet(somermed_blocks) |>
+  addProviderTiles(provider = "CartoDB.Positron") |>
+  addPolygons(weight = 2,
+              color = "forestgreen",
+              fillColor = "forestgreen",
+              fillOpacity = 0.1,
+              highlightOptions = highlightOptions(weight = 3,
+                                                  fillOpacity = 0.5),
+              label = somermed_blocks$GEOID10)
+```
+
+```{r}
+base_db <- dbConnect(drv=RSQLite::SQLite(), 
+                     dbname=here("tdm23-base.db"))
+
+base_veh <- dbGetQuery(base_db, 'SELECT * FROM veh')
+```
+
+```{r}
+alt_db <- dbConnect(drv=RSQLite::SQLite(), 
+                     dbname=here("tdm23-alt.db"))
+
+alt_veh <- dbGetQuery(alt_db, 'SELECT * FROM veh')
+```
+
+```{r}
+base_veh <- base_veh |>
+  rename(veh_suff_base = veh_suff) |>
+  select(-num_vehs)
+
+alt_veh <- alt_veh|>
+  rename(veh_suff_alt = veh_suff) |>
+  select(-num_vehs)
+
+vehs_dif <- full_join(base_veh, alt_veh) |>
+  mutate(veh_suff_base = ifelse(is.na(veh_suff_base), "new", veh_suff_base))
+```
+
+```{r}
+vehs_changed_hh <- vehs_dif |>
+  mutate(change = case_when(veh_suff_base == "new" & veh_suff_alt == "zv" ~
+                              "New zv",
+                            veh_suff_base == "new" & veh_suff_alt == "iv" ~
+                              "New iv",
+                            veh_suff_base == "new" & veh_suff_alt == "sv" ~
+                              "New sv",
+                            veh_suff_base == "zv" & veh_suff_alt == "iv" ~
+                              "gained vehicle",
+                            veh_suff_base == "zv" & veh_suff_alt == "sv" ~
+                              "gained vehicle",
+                            veh_suff_base == "sv" & veh_suff_alt == "zv" ~
+                              "lost vehicle",
+                            veh_suff_base == "sv" & veh_suff_alt == "iv" ~
+                              "lost vehicle",
+                            veh_suff_base == "iv" & veh_suff_alt == "zv" ~
+                              "lost vehicle",
+                            veh_suff_base == "iv" & veh_suff_alt == "sv" ~
+                              "gained vehicle",
+                            TRUE ~ "no change"))
+
+vehs_changed_blocks <-vehs_changed_hh |>
+  group_by(block_id) |>
+  summarise(n_hhs = n(),
+            n_new_zv = sum(change == "New zv"),
+            n_new_iv = sum(change == "New iv"),
+            n_new_sv = sum(change == "New sv"),
+            n_gained_veh = sum(change == "gained vehicle"),
+            n_lost_veh = sum(change == "lost vehicle")) |>
+  filter(n_lost_veh +
+           n_gained_veh +
+           n_new_sv +
+           n_new_iv +
+           n_new_zv > 0) |>
+  rename(GEOID10 = block_id)
+
+kable(vehs_changed_blocks)
+```
