@@ -77,68 +77,195 @@ leaflet(somermed_blocks) |>
 ```
 
 ```{r}
-base_db <- dbConnect(drv=RSQLite::SQLite(), 
-                     dbname=here("tdm23-base.db"))
-
-base_veh <- dbGetQuery(base_db, 'SELECT * FROM veh')
+vehs_dif <- read_csv("vehs_changed_blocks.csv") %>%
+  mutate(GEOID10 = as.character(GEOID10))
 ```
 
 ```{r}
-alt_db <- dbConnect(drv=RSQLite::SQLite(), 
-                     dbname=here("tdm23-alt.db"))
-
-alt_veh <- dbGetQuery(alt_db, 'SELECT * FROM veh')
+all_blocks <- blocks(state = "MA", year = 2010, progress_bar = FALSE) %>%
+  st_transform("WGS84")
 ```
 
 ```{r}
-base_veh <- base_veh |>
-  rename(veh_suff_base = veh_suff) |>
-  select(-num_vehs)
+blocks_merged <- all_blocks %>%
+  left_join(vehs_dif, by = "GEOID10") %>%
+  mutate(net_change = n_gained_veh - n_lost_veh,
+         change_type = case_when(
+           net_change > 0 ~ "Increase",
+           net_change < 0 ~ "Decrease",
+           TRUE         ~ "No Change"
+         ))
 
-alt_veh <- alt_veh|>
-  rename(veh_suff_alt = veh_suff) |>
-  select(-num_vehs)
-
-vehs_dif <- full_join(base_veh, alt_veh) |>
-  mutate(veh_suff_base = ifelse(is.na(veh_suff_base), "new", veh_suff_base))
+blocks_filtered <- blocks_merged %>% 
+  filter(net_change != 0)
 ```
 
 ```{r}
-vehs_changed_hh <- vehs_dif |>
-  mutate(change = case_when(veh_suff_base == "new" & veh_suff_alt == "zv" ~
-                              "New zv",
-                            veh_suff_base == "new" & veh_suff_alt == "iv" ~
-                              "New iv",
-                            veh_suff_base == "new" & veh_suff_alt == "sv" ~
-                              "New sv",
-                            veh_suff_base == "zv" & veh_suff_alt == "iv" ~
-                              "gained vehicle",
-                            veh_suff_base == "zv" & veh_suff_alt == "sv" ~
-                              "gained vehicle",
-                            veh_suff_base == "sv" & veh_suff_alt == "zv" ~
-                              "lost vehicle",
-                            veh_suff_base == "sv" & veh_suff_alt == "iv" ~
-                              "lost vehicle",
-                            veh_suff_base == "iv" & veh_suff_alt == "zv" ~
-                              "lost vehicle",
-                            veh_suff_base == "iv" & veh_suff_alt == "sv" ~
-                              "gained vehicle",
-                            TRUE ~ "no change"))
+pal <- colorFactor(
+  palette = c("Decrease" = "red", "Increase" = "green"),
+  domain = blocks_filtered$change_type
+)
 
-vehs_changed_blocks <-vehs_changed_hh |>
-  group_by(block_id) |>
-  summarise(n_hhs = n(),
-            n_new_zv = sum(change == "New zv"),
-            n_new_iv = sum(change == "New iv"),
-            n_new_sv = sum(change == "New sv"),
-            n_gained_veh = sum(change == "gained vehicle"),
-            n_lost_veh = sum(change == "lost vehicle")) |>
-  filter(n_lost_veh +
-           n_gained_veh +
-           n_new_sv +
-           n_new_iv +
-           n_new_zv > 0) |>
-  rename(GEOID10 = block_id)
+leaflet(blocks_filtered) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(weight = 1,
+              color = "black",
+              fillColor = ~pal(change_type),
+              fillOpacity = 0.7,
+              highlightOptions = highlightOptions(weight = 3, fillOpacity = 0.5),
+              label = ~paste0("<strong>GEOID:</strong> ", GEOID10, "<br>",
+                              "<strong>Households:</strong> ", n_hhs, "<br>",
+                              "<strong>Gained:</strong> ", n_gained_veh, "<br>",
+                              "<strong>Lost:</strong> ", n_lost_veh, "<br>",
+                              "<strong>Net Change:</strong> ", net_change)) %>%
+  addLegend("bottomright",
+            pal = pal,
+            values = ~change_type,
+            title = "Vehicle Change",
+            opacity = 1)
+```
 
-kable(vehs_changed_blocks)
+```{r}
+mbta_arc <- st_read("inputs/mbta_rapid_transit/MBTA_ARC.shp", quiet = TRUE) %>% 
+  st_transform("WGS84")
+
+```
+
+```{r}
+mbta_arc_green <- mbta_arc %>% filter(LINE == "GREEN")
+
+```
+
+```{r}
+m1 <- leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  
+  addPolygons(data = blocks_filtered,
+              weight = 1,
+              color = "black",
+              fillColor = ~pal(change_type),
+              fillOpacity = 0.7,
+              highlightOptions = highlightOptions(weight = 3, fillOpacity = 0.5),
+              label = ~paste0("<strong>GEOID:</strong> ", GEOID10, "<br>",
+                              "<strong>Households:</strong> ", n_hhs, "<br>",
+                              "<strong>Gained:</strong> ", n_gained_veh, "<br>",
+                              "<strong>Lost:</strong> ", n_lost_veh, "<br>",
+                              "<strong>Net Change:</strong> ", net_change),
+              group = "Blocks") %>%
+  
+  addPolylines(data = mbta_arc_green,
+               color = "green",  
+               weight = 2,
+               opacity = 1,
+               group = "MBTA Green Arcs") %>%
+  
+
+  addLegend("bottomright",
+            pal = pal,
+            values = blocks_filtered$change_type,
+            title = "Vehicle Change",
+            opacity = 1)
+
+
+m1
+```
+
+```{r}
+vehs_dif_summary <- vehs_dif %>% 
+  summarize(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)))
+
+vehs_dif_summary
+```
+
+```{r}
+mbta_arc_orange <- mbta_arc %>% filter(LINE == "ORANGE")
+mbta_arc_green  <- mbta_arc %>% filter(LINE == "GREEN")
+mbta_arc_red    <- mbta_arc %>% filter(LINE == "RED")
+```
+
+```{r}
+m2 <- leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  
+  addPolygons(data = blocks_filtered,
+              weight = 1,
+              color = "black",
+              fillColor = ~pal(change_type),
+              fillOpacity = 0.7,
+              highlightOptions = highlightOptions(weight = 3, fillOpacity = 0.5),
+              label = ~paste0("<strong>GEOID:</strong> ", GEOID10, "<br>",
+                              "<strong>Households:</strong> ", n_hhs, "<br>",
+                              "<strong>Gained:</strong> ", n_gained_veh, "<br>",
+                              "<strong>Lost:</strong> ", n_lost_veh, "<br>",
+                              "<strong>Net Change:</strong> ", net_change),
+              group = "Blocks") %>%
+
+  addPolylines(data = mbta_arc_orange,
+               color = "orange",
+               weight = 2,
+               opacity = 1,
+               group = "ORANGE Lines") %>%
+
+  addPolylines(data = mbta_arc_green,
+               color = "green",
+               weight = 2,
+               opacity = 1,
+               group = "GREEN Lines") %>%
+
+  addPolylines(data = mbta_arc_red,
+               color = "red",
+               weight = 2,
+               opacity = 1,
+               group = "RED Lines") %>%
+  
+  addLegend("bottomright",
+            pal = pal,
+            values = blocks_filtered$change_type,
+            title = "Vehicle Change",
+            opacity = 1)
+
+m2
+```
+
+```{r}
+m3 <- leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  
+  addPolygons(data = blocks_filtered,
+              weight = 1,
+              color = "black",
+              fillColor = ~pal(change_type),
+              fillOpacity = 0.7,
+              highlightOptions = highlightOptions(weight = 3, fillOpacity = 0.5),
+              label = ~paste0("<strong>GEOID:</strong> ", GEOID10, "<br>",
+                              "<strong>Households:</strong> ", n_hhs, "<br>",
+                              "<strong>Gained:</strong> ", n_gained_veh, "<br>",
+                              "<strong>Lost:</strong> ", n_lost_veh, "<br>",
+                              "<strong>Net Change:</strong> ", net_change),
+              group = "Blocks") %>%
+
+  addPolylines(data = mbta_arc_orange,
+               color = "orange",
+               weight = 2,
+               opacity = 1,
+               group = "ORANGE Lines") %>%
+
+  addPolylines(data = mbta_arc_red,
+               color = "red",
+               weight = 2,
+               opacity = 1,
+               group = "RED Lines") %>%
+      
+  addLegend("bottomright",
+            pal = pal,
+            values = blocks_filtered$change_type,
+            title = "Vehicle Change",
+            opacity = 1) 
+
+m3
+```
+
+```{r}
+vehs_dif_summary <- vehs_dif %>% 
+  summarize(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)))
 ```
